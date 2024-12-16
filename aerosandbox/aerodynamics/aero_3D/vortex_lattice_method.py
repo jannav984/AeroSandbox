@@ -56,6 +56,7 @@ class VortexLatticeMethod(ExplicitAnalysis):
         ] = np.cosspace,
         vortex_core_radius: float = 1e-8,
         align_trailing_vortices_with_wind: bool = False,
+        model_size: str = "medium",
     ):
         super().__init__()
 
@@ -74,6 +75,7 @@ class VortexLatticeMethod(ExplicitAnalysis):
         self.chordwise_spacing_function = chordwise_spacing_function
         self.vortex_core_radius = vortex_core_radius
         self.align_trailing_vortices_with_wind = align_trailing_vortices_with_wind
+        self.model_size = model_size
 
         ### Determine whether you should run the problem as symmetric
         self.run_symmetric = False
@@ -142,6 +144,12 @@ class VortexLatticeMethod(ExplicitAnalysis):
         back_right_vertices = []
         front_right_vertices = []
         is_trailing_edge = []
+        is_leading_edge = []
+        airfoils: List[Airfoil] = []
+        strip_front_left_vertices = []
+        strip_back_left_vertices = []
+        strip_back_right_vertices = []
+        strip_front_right_vertices = []
 
         for wing in self.airplane.wings:
             if self.spanwise_resolution > 1:
@@ -163,13 +171,50 @@ class VortexLatticeMethod(ExplicitAnalysis):
             is_trailing_edge.append(
                 (np.arange(len(faces)) + 1) % self.chordwise_resolution == 0
             )
+            is_leading_edge.append(
+                (np.arange(len(faces))) % self.chordwise_resolution == 0
+            )
+
+            wing_airfoils = []
+            for xsec_a, xsec_b in zip(
+                    wing.xsecs[:-1], wing.xsecs[1:]
+            ):  # Do the right side
+                wing_airfoils.append(
+                    xsec_a.airfoil.blend_with_another_airfoil(
+                        airfoil=xsec_b.airfoil,
+                        blend_fraction=0.5,
+                    )
+                )
+            airfoils.extend(wing_airfoils)
+            if wing.symmetric:  # Do the left side, if applicable
+                airfoils.extend(wing_airfoils)
+
+            strip_points, strip_faces = wing.mesh_thin_surface(
+                method="quad",
+                chordwise_resolution=1,
+                add_camber=False,
+            )
+            strip_front_left_vertices.append(strip_points[strip_faces[:, 0], :])
+            strip_back_left_vertices.append(strip_points[strip_faces[:, 1], :])
+            strip_back_right_vertices.append(strip_points[strip_faces[:, 2], :])
+            strip_front_right_vertices.append(strip_points[strip_faces[:, 3], :])
 
         front_left_vertices = np.concatenate(front_left_vertices)
         back_left_vertices = np.concatenate(back_left_vertices)
         back_right_vertices = np.concatenate(back_right_vertices)
         front_right_vertices = np.concatenate(front_right_vertices)
         is_trailing_edge = np.concatenate(is_trailing_edge)
+        is_leading_edge = np.concatenate(is_leading_edge)
 
+        strip_front_left_vertices = np.concatenate(strip_front_left_vertices)
+        strip_back_left_vertices = np.concatenate(strip_back_left_vertices)
+        strip_back_right_vertices = np.concatenate(strip_back_right_vertices)
+        strip_front_right_vertices = np.concatenate(strip_front_right_vertices)
+        # Compute panel statistics
+        chord_vectors = (strip_back_left_vertices + strip_back_right_vertices) / 2 - (
+                strip_front_left_vertices + strip_front_right_vertices
+        ) / 2
+        chords = np.linalg.norm(chord_vectors, axis=1)
         ### Compute panel statistics
         diag1 = front_right_vertices - back_left_vertices
         diag2 = front_left_vertices - back_right_vertices
@@ -193,6 +238,7 @@ class VortexLatticeMethod(ExplicitAnalysis):
         self.back_right_vertices = back_right_vertices
         self.front_right_vertices = front_right_vertices
         self.is_trailing_edge = is_trailing_edge
+        self.is_leading_edge = is_leading_edge
         self.normal_directions = normal_directions
         self.areas = areas
         self.left_vortex_vertices = left_vortex_vertices
@@ -200,6 +246,8 @@ class VortexLatticeMethod(ExplicitAnalysis):
         self.vortex_centers = vortex_centers
         self.vortex_bound_leg = vortex_bound_leg
         self.collocation_points = collocation_points
+        self.airfoils: List[Airfoil] = airfoils
+        self.number_of_strips = int(len(areas) / self.chordwise_resolution)
 
         ##### Setup Operating Point
         if self.verbose:
@@ -290,9 +338,159 @@ class VortexLatticeMethod(ExplicitAnalysis):
             np.add(vortex_centers, -wide(np.array(self.xyz_ref))), forces_geometry
         )
 
+        # Calculate element dimensional aero. forces
+        forces_wind_el = self.op_point.convert_axes(
+            forces_geometry[:, 0], forces_geometry[:, 1], forces_geometry[:, 2],
+            from_axes="geometry",
+            to_axes="wind"
+        )
+        Le = -forces_wind_el[2]
+        De = -forces_wind_el[0]
+        Ye = -forces_wind_el[1]
+
+        # Calculate element dimensional aero. moments
+        moment_body_el = self.op_point.convert_axes(
+            moments_geometry[:, 0], moments_geometry[:, 1], moments_geometry[:, 2],
+            from_axes="geometry",
+            to_axes="body"
+        )
+        le = moment_body_el[0]
+        me = moment_body_el[1]
+        ne = moment_body_el[2]
+
+        # Calculate strip dimensional forces and moments
+        # Inviscid forces and moments
+        Ls = np.sum(np.reshape(Le, (self.number_of_strips, self.chordwise_resolution)), axis=1)
+        Ds = np.sum(np.reshape(De, (self.number_of_strips, self.chordwise_resolution)), axis=1)
+        Ys = np.sum(np.reshape(Ye, (self.number_of_strips, self.chordwise_resolution)), axis=1)
+        ls = np.sum(np.reshape(le, (self.number_of_strips, self.chordwise_resolution)), axis=1)
+        ms = np.sum(np.reshape(me, (self.number_of_strips, self.chordwise_resolution)), axis=1)
+        ns = np.sum(np.reshape(ne, (self.number_of_strips, self.chordwise_resolution)), axis=1)
+        As = np.sum(np.reshape(self.areas, (self.number_of_strips, self.chordwise_resolution)), axis=1)
+        xs1 = np.reshape(self.front_left_vertices[:, 0], (self.number_of_strips, self.chordwise_resolution))
+        xs2 = np.reshape(self.back_left_vertices[:, 0], (self.number_of_strips, self.chordwise_resolution))
+        cs = xs2[:, -1] - xs1[:, 0]
+        ys = np.reshape(self.vortex_centers[:, 1], (self.number_of_strips, self.chordwise_resolution))
+        ys = ys[:, 0]
+
+        # Calculate strip aero. coefficients
+        q = self.op_point.dynamic_pressure()
+        cLsi = np.divide(Ls, As) / q
+        cDsi = np.divide(Ds, As) / q
+        cYs = np.divide(Ys, As) / q
+        cls = np.divide(np.divide(ls, As), cs) / q
+        cms = np.divide(np.divide(ms, As), cs) / q
+        cns = np.divide(np.divide(ns, As), cs) / q
+
+        ##### Evaluate the aerodynamics with induced effects
+        xyz_points = front_left_vertices[self.is_trailing_edge, :] + (
+                front_right_vertices[self.is_trailing_edge, :] - front_left_vertices[self.is_trailing_edge, :]
+        ) / 2
+        xyz_points[:, 0] = 10.0 * strip_back_left_vertices[:, 0]
+
+        # Include wing sweep effects
+        Res = (
+              self.op_point.velocity
+              * chords
+              / self.op_point.atmosphere.kinematic_viscosity()
+        )
+
+        # Calculate profile drag forces
+        #    - use Newton's method to find the angle of attack that gives the local wing lift coefficient
+        def get_aero(af, alpha, Re):
+            if self.model_size == 'xfoil':
+                aero = af.get_aero_from_xfoil(
+                    alpha=alpha,
+                    Re=Re,
+                    mach=0.0,
+                )
+            else:
+                aero = af.get_aero_from_neuralfoil(
+                    alpha=alpha,
+                    Re=Re,
+                    mach=0.0,
+                    model_size=self.model_size,
+                )
+
+            # Profile aerodynamic coefficients
+            CLp = aero["CL"][0]
+            CDp = aero["CD"][0]
+            CMp = aero["CM"][0]
+            return CLp, CDp, CMp
+
+        def get_gradients(airfoil, alpha, Re):
+            cl_plus = get_aero(airfoil, alpha + 0.25, Re)[0]
+            cl_minus = get_aero(airfoil, alpha - 0.25, Re)[0]
+            dcl_alpha = (cl_plus - cl_minus) / 0.5
+            return dcl_alpha
+
+        # Calculate profile drag forces using newton's method
+        tol = 1e-4
+        max_iter = 100
+        CLps = []
+        CDps = []
+
+        for i, af in enumerate(airfoils):
+            CLa = 5
+            alpha0 = np.radians(-2)
+            alpha1 = np.degrees((cLsi[i] + CLa * alpha0) / CLa)
+            for it in range(max_iter):
+                cl = get_aero(af, alpha1, Res[i])[0]
+                cl_alpha = get_gradients(af, alpha1, Res[i])
+                error = cl - cLsi[i]
+                if abs(error) < tol:
+                    break
+                alpha1 = alpha1 - error / cl_alpha
+            CLp, CDp, CMp = get_aero(af, alpha1, Res[i])
+            CLps.append(CLp)
+            CDps.append(CDp)
+
+        CLps = np.array(CLps)
+        CDps = np.array(CDps)
+
+
+        # Calculate profile drag forces
+        velocities = self.get_velocity_at_points(xyz_points)
+        velocity_magnitudes = np.linalg.norm(velocities, axis=1)
+        # Add profile forces according to the LLT in ASB
+        forces_profile_geometry = (
+                0.5
+                * self.op_point.atmosphere.density()
+                * velocities
+                * tall(velocity_magnitudes)
+                * tall(CDps)
+                * tall(As)
+        )
+
+        aero_centers_left = 0.75 * front_left_vertices[self.is_leading_edge, :] + 0.25 * back_left_vertices[
+                                                                                         self.is_trailing_edge, :]
+        aero_centers_right = 0.75 * front_right_vertices[self.is_leading_edge, :] + 0.25 * back_right_vertices[
+                                                                                           self.is_trailing_edge, :]
+        aero_centers = (aero_centers_left + aero_centers_right) / 2
+        aero_axes = aero_centers_right - aero_centers_left
+
+        moments_profile_geometry = np.cross(
+            np.add(aero_centers, -wide(np.array(self.xyz_ref))),
+            forces_profile_geometry,
+        )
+
+        force_profile_geometry = np.sum(forces_profile_geometry, axis=0)
+        moment_profile_geometry = np.sum(moments_profile_geometry, axis=0)
+
+        # Compute pitching moment
+
+        bound_leg_YZ = aero_axes
+        bound_leg_YZ[:, 0] = 0
+        moment_pitching_geometry = 0
+
         # Calculate total forces and moments
         force_geometry = np.sum(forces_geometry, axis=0)
         moment_geometry = np.sum(moments_geometry, axis=0)
+        force_geometry = np.add(force_geometry, force_profile_geometry)
+        moment_geometry = (
+                np.add(moment_geometry, moment_profile_geometry)
+                + moment_pitching_geometry
+        )
 
         force_body = self.op_point.convert_axes(
             force_geometry[0],
@@ -308,6 +506,7 @@ class VortexLatticeMethod(ExplicitAnalysis):
             from_axes="body",
             to_axes="wind",
         )
+
         moment_body = self.op_point.convert_axes(
             moment_geometry[0],
             moment_geometry[1],
@@ -372,6 +571,17 @@ class VortexLatticeMethod(ExplicitAnalysis):
             "Cl": Cl,
             "Cm": Cm,
             "Cn": Cn,
+            "cLsi": cLsi,
+            "cLsp": CLps,
+            "cDsi": cDsi,
+            "cDsp": CDps,
+            "cYs": cYs,
+            "cls": cls,
+            "cms": cms,
+            "cns": cns,
+            "As": As,
+            "ys": ys,
+            "cs": cs,
         }
 
     def run_with_stability_derivatives(
