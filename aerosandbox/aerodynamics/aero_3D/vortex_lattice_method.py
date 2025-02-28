@@ -247,7 +247,7 @@ class VortexLatticeMethod(ExplicitAnalysis):
         self.vortex_bound_leg = vortex_bound_leg
         self.collocation_points = collocation_points
         self.airfoils: List[Airfoil] = airfoils
-        self.number_of_strips = int(len(areas) / self.chordwise_resolution)
+        self.number_of_strips = int(areas.shape[0] / self.chordwise_resolution)
 
         ##### Setup Operating Point
         if self.verbose:
