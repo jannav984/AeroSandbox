@@ -18,6 +18,8 @@ class KulfanAirfoil(Airfoil):
         TE_thickness: float = 0.0,
         N1: float = 0.5,
         N2: float = 1.0,
+        yLE: float = 0.0,
+        yTE: float = 0.0,
     ):
         ### Handle the airfoil name
         self.name = name
@@ -66,6 +68,8 @@ class KulfanAirfoil(Airfoil):
         self.TE_thickness = TE_thickness
         self.N1 = N1
         self.N2 = N2
+        self.yLE = yLE
+        self.yTE = yTE
 
     def __repr__(self) -> str:
         return f"Airfoil {self.name} (Kulfan / CST parameterization)"
@@ -509,6 +513,9 @@ class KulfanAirfoil(Airfoil):
         # Add trailing-edge (TE) thickness
         y_upper += x_over_c * self.TE_thickness / 2
 
+        # Add trailing-edge (TE) and leading-edge (LE) displacements - mod JNA
+        y_upper += x_over_c * self.yTE + (1 - x_over_c) * self.yLE
+
         # Add Kulfan's leading-edge-modification (LEM)
         y_upper += (
             self.leading_edge_weight
@@ -564,6 +571,9 @@ class KulfanAirfoil(Airfoil):
 
         # Add trailing-edge (TE) thickness
         y_lower -= x_over_c * self.TE_thickness / 2
+
+        # Add trailing-edge (TE) and leading-edge (LE) displacements mod JNA
+        y_lower += x_over_c * self.yTE + (1 - x_over_c) * self.yLE
 
         # Add Kulfan's leading-edge-modification (LEM)
         y_lower += (
@@ -754,4 +764,6 @@ class KulfanAirfoil(Airfoil):
             + b_fraction * foil_b.TE_thickness,
             N1=a_fraction * foil_a.N1 + b_fraction * foil_b.N1,
             N2=a_fraction * foil_a.N2 + b_fraction * foil_b.N2,
+            yLE=a_fraction * foil_a.yLE + b_fraction * foil_b.yLE,
+            yTE=a_fraction * foil_a.yTE + b_fraction * foil_b.yTE,
         )

@@ -247,7 +247,7 @@ class VortexLatticeMethod(ExplicitAnalysis):
         self.vortex_bound_leg = vortex_bound_leg
         self.collocation_points = collocation_points
         self.airfoils: List[Airfoil] = airfoils
-        self.number_of_strips = int(areas.shape[0] / self.chordwise_resolution)
+        self.number_of_strips = int(areas.shape[0] / self.chordwise_resolution) 
 
         ##### Setup Operating Point
         if self.verbose:
@@ -386,7 +386,7 @@ class VortexLatticeMethod(ExplicitAnalysis):
         xyz_points = front_left_vertices[self.is_trailing_edge, :] + (
                 front_right_vertices[self.is_trailing_edge, :] - front_left_vertices[self.is_trailing_edge, :]
         ) / 2
-        xyz_points[:, 0] = 10.0 * strip_back_left_vertices[:, 0]
+        xyz_points[:, 0] =  10.0 * back_left_vertices[self.is_trailing_edge, 0]
 
         # Include wing sweep effects
         Res = (
@@ -395,102 +395,106 @@ class VortexLatticeMethod(ExplicitAnalysis):
               / self.op_point.atmosphere.kinematic_viscosity()
         )
 
-        # Calculate profile drag forces
-        #    - use Newton's method to find the angle of attack that gives the local wing lift coefficient
-        def get_aero(af, alpha, Re):
-            if self.model_size == 'xfoil':
-                aero = af.get_aero_from_xfoil(
-                    alpha=alpha,
-                    Re=Re,
-                    mach=0.0,
-                )
-            else:
-                aero = af.get_aero_from_neuralfoil(
-                    alpha=alpha,
-                    Re=Re,
-                    mach=0.0,
-                    model_size=self.model_size,
-                )
-
-            # Profile aerodynamic coefficients
-            CLp = aero["CL"][0]
-            CDp = aero["CD"][0]
-            CMp = aero["CM"][0]
-            return CLp, CDp, CMp
-
-        def get_gradients(airfoil, alpha, Re):
-            cl_plus = get_aero(airfoil, alpha + 0.25, Re)[0]
-            cl_minus = get_aero(airfoil, alpha - 0.25, Re)[0]
-            dcl_alpha = (cl_plus - cl_minus) / 0.5
-            return dcl_alpha
-
-        # Calculate profile drag forces using newton's method
-        tol = 1e-4
-        max_iter = 100
         CLps = []
         CDps = []
-
-        for i, af in enumerate(airfoils):
-            CLa = 5
-            alpha0 = np.radians(-2)
-            alpha1 = np.degrees((cLsi[i] + CLa * alpha0) / CLa)
-            for it in range(max_iter):
-                cl = get_aero(af, alpha1, Res[i])[0]
-                cl_alpha = get_gradients(af, alpha1, Res[i])
-                error = cl - cLsi[i]
-                if abs(error) < tol:
-                    break
-                alpha1 = alpha1 - error / cl_alpha
-            CLp, CDp, CMp = get_aero(af, alpha1, Res[i])
-            CLps.append(CLp)
-            CDps.append(CDp)
-
-        CLps = np.array(CLps)
-        CDps = np.array(CDps)
-
-
+        CMps = []   
+        if not is_casadi_type(airfoils[0].coordinates):   
         # Calculate profile drag forces
-        velocities = self.get_velocity_at_points(xyz_points)
-        velocity_magnitudes = np.linalg.norm(velocities, axis=1)
-        # Add profile forces according to the LLT in ASB
-        forces_profile_geometry = (
-                0.5
-                * self.op_point.atmosphere.density()
-                * velocities
-                * tall(velocity_magnitudes)
-                * tall(CDps)
-                * tall(As)
-        )
+        #    - use Newton's method to find the angle of attack that gives the local wing lift coefficient
+            def get_aero(af, alpha, Re):
+                if self.model_size == 'xfoil':
+                    aero = af.get_aero_from_xfoil(
+                        alpha=alpha,
+                        Re=Re,
+                        mach=0.0,
+                    )
+                else:
+                    aero = af.get_aero_from_neuralfoil(
+                        alpha=alpha,
+                        Re=Re,
+                        mach=0.0,
+                        model_size=self.model_size,
+                    )
 
-        aero_centers_left = 0.75 * front_left_vertices[self.is_leading_edge, :] + 0.25 * back_left_vertices[
-                                                                                         self.is_trailing_edge, :]
-        aero_centers_right = 0.75 * front_right_vertices[self.is_leading_edge, :] + 0.25 * back_right_vertices[
-                                                                                           self.is_trailing_edge, :]
-        aero_centers = (aero_centers_left + aero_centers_right) / 2
-        aero_axes = aero_centers_right - aero_centers_left
+                # Profile aerodynamic coefficients
+                CLp = aero["CL"][0]
+                CDp = aero["CD"][0]
+                CMp = aero["CM"][0]
+                return CLp, CDp, CMp
 
-        moments_profile_geometry = np.cross(
-            np.add(aero_centers, -wide(np.array(self.xyz_ref))),
-            forces_profile_geometry,
-        )
+            def get_gradients(airfoil, alpha, Re):
+                cl_plus = get_aero(airfoil, alpha + 0.25, Re)[0]
+                cl_minus = get_aero(airfoil, alpha - 0.25, Re)[0]
+                dcl_alpha = (cl_plus - cl_minus) / 0.5
+                return dcl_alpha
 
-        force_profile_geometry = np.sum(forces_profile_geometry, axis=0)
-        moment_profile_geometry = np.sum(moments_profile_geometry, axis=0)
+        # Calculate profile drag forces using newton's method                   
+            tol = 1e-4
+            max_iter = 10            
+            for i, af in enumerate(airfoils):
+                CLa = 5
+                alpha0 = np.radians(-2)
+                alpha1 = np.degrees((cLsi[i] + CLa * alpha0) / CLa)
+                for iter in range(max_iter):
+                    cl = get_aero(af, alpha1, Res[i])[0]
+                    dcl_alpha = get_gradients(af, alpha1, Res[i])
+                    error = cl - cLsi[i] 
+                    if abs(error) < tol:
+                        print(f"Converged after {iter} iterations")
+                        break
+                    alpha1 = alpha1 - error / dcl_alpha
+                CLp, CDp, CMp = get_aero(af, alpha1, Res[i])
+                CLps.append(CLp)
+                CDps.append(CDp)
+                CMps.append(CMp)
+            CLps = np.array(CLps)
+            CDps = np.array(CDps)
+            CMps = np.array(CMps)
 
-        # Compute pitching moment
 
-        bound_leg_YZ = aero_axes
-        bound_leg_YZ[:, 0] = 0
-        moment_pitching_geometry = 0
+            # Calculate profile drag forces
+            velocities = self.get_velocity_at_points(xyz_points)
+            velocity_magnitudes = np.linalg.norm(velocities, axis=1)
+            # Add profile forces according to the LLT in ASB
+            forces_profile_geometry = (
+                    0.5
+                    * self.op_point.atmosphere.density()
+                    * velocities
+                    * tall(velocity_magnitudes)
+                    * tall(CDps)
+                    * tall(As)
+            )
+
+            aero_centers_left = 0.75 * front_left_vertices[self.is_leading_edge, :] + 0.25 * back_left_vertices[
+                                                                                            self.is_trailing_edge, :]
+            aero_centers_right = 0.75 * front_right_vertices[self.is_leading_edge, :] + 0.25 * back_right_vertices[
+                                                                                            self.is_trailing_edge, :]
+            aero_centers = (aero_centers_left + aero_centers_right) / 2
+            aero_axes = aero_centers_right - aero_centers_left
+
+            moments_profile_geometry = np.cross(
+                np.add(aero_centers, -wide(np.array(self.xyz_ref))),
+                forces_profile_geometry,
+            )
+
+            force_profile_geometry = np.sum(forces_profile_geometry, axis=0)
+            moment_profile_geometry = np.sum(moments_profile_geometry, axis=0)
+
+            # Compute pitching moment
+
+            bound_leg_YZ = aero_axes
+            bound_leg_YZ[:, 0] = 0
+            moment_pitching_geometry = 0
 
         # Calculate total forces and moments
         force_geometry = np.sum(forces_geometry, axis=0)
         moment_geometry = np.sum(moments_geometry, axis=0)
-        force_geometry = np.add(force_geometry, force_profile_geometry)
-        moment_geometry = (
-                np.add(moment_geometry, moment_profile_geometry)
-                + moment_pitching_geometry
-        )
+        if not is_casadi_type(airfoils[0].coordinates):
+            force_geometry = np.add(force_geometry, force_profile_geometry)
+            moment_geometry = (
+                    np.add(moment_geometry, moment_profile_geometry)
+                    + moment_pitching_geometry
+            )
 
         force_body = self.op_point.convert_axes(
             force_geometry[0],

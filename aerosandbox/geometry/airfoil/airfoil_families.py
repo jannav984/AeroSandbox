@@ -140,6 +140,8 @@ def get_kulfan_coordinates(
     upper_weights: np.ndarray = 0.2 * np.ones(8),
     leading_edge_weight: float = 0.0,
     TE_thickness: float = 0.0,
+    yLE: float = 0.,
+    yTE: float = 0.,
     n_points_per_side: int = _default_n_points_per_side,
     N1: float = 0.5,
     N2: float = 1.0,
@@ -211,6 +213,10 @@ def get_kulfan_coordinates(
 
         N2 (float): The shape factor corresponding to the trailing edge of the airfoil. See above for examples.
 
+        yLE (float): For camber morphing of the airfoil: displacement of LE. Default is 0. 
+
+        yTE (float): For camber morphing of the airfoil: displacement of TE. Default is 0.
+
     Returns:
         np.ndarray: The coordinates of the airfoil as a Nx2 array.
     """
@@ -263,6 +269,10 @@ def get_kulfan_coordinates(
     y_lower -= x * TE_thickness / 2
     y_upper += x * TE_thickness / 2
 
+    # Add trailing-edge (TE) and leading-edge (LE) displacements
+    y_lower += x * yTE + (1 - x) * yLE
+    y_upper += x * yTE + (1 - x) * yLE
+
     # Add Kulfan's leading-edge-modification (LEM)
     y_lower += leading_edge_weight * (x) * (1 - x) ** (np.length(lower_weights) + 0.5)
     y_upper += leading_edge_weight * (x) * (1 - x) ** (np.length(upper_weights) + 0.5)
@@ -283,6 +293,16 @@ def get_kulfan_parameters(
     normalize_coordinates: bool = True,
     use_leading_edge_modification: bool = True,
     method: str = "least_squares",
+    upper_weights_init: np.ndarray = [],     # 0.2 * np.ones(n_weights_per_side),
+    lower_weights_init: np.ndarray = [],    # 0.2 * np.ones(n_weights_per_side),
+    leading_edge_weight_init: float = 0.,
+    x_pos_front_spar: float = 0.0,
+    x_pos_rear_spar: float = 1.0,
+    yLE: float = 0.0,
+    yTE: float = 0.0,
+    TE_delta: float = 0.0,
+    TE_beta: float = 0.0,
+    TE_thickness: float = 0.0,
 ) -> Dict[str, Union[np.ndarray, float]]:
     """
     Given a set of airfoil coordinates, reconstructs the Kulfan parameters that would recreate that airfoil. Uses a
@@ -553,7 +573,127 @@ def get_kulfan_parameters(
             "TE_thickness": trailing_edge_thickness,
             "leading_edge_weight": leading_edge_weight,
         }
+    elif method == "least_squares_morphing":
+        """
 
+        The goal here is to set up this fitting problem as a least-squares problem (likely an overconstrained one, 
+        but keeping it general for now. This will then be solved with np.linalg.lstsq(A, b), where A will (likely) 
+        not be square.
+
+        The columns of the A matrix will correspond to our unknowns, which are going to be a 1D vector `x` packed in as:
+            * upper_weights from 0 to n_weights_per_side - 1
+            * lower_weights from 0 to n_weights_per_side - 1
+            * leading_edge_weight
+            * trailing_edge_thickness
+
+        See `get_kulfan_coordinates()` for more details on the meaning of these variables.
+
+        The rows of the A matrix will correspond to each row of the given airfoil coordinates (i.e., a single vertex 
+        on the airfoil). The idea here is to express each vertex as a linear combination of the unknowns, and then
+        solve for the unknowns that minimize the error between the given airfoil coordinates and the reconstructed
+        airfoil coordinates.
+
+        """
+        if (yLE == 0):
+            x_pos_front_spar = 0.0
+        if (yTE == 0):
+            x_pos_rear_spar = 1.0
+
+        if upper_weights_init == []:
+            upper_weights_init = 0.2 * np.ones(n_weights_per_side)
+        if lower_weights_init == []:
+            lower_weights_init = 0.2 * np.ones(n_weights_per_side)
+
+        if normalize_coordinates:
+            coordinates = Airfoil(
+                name="Target Airfoil",
+                coordinates=coordinates
+            ).normalize().coordinates
+
+        n_coordinates = np.length(coordinates)
+
+        x = coordinates[:, 0]
+        y = coordinates[:, 1]
+
+        LE_index = np.argmin(x)
+        is_upper = np.arange(len(x)) <= LE_index
+
+        # Boolean mask for lower airfoil surface within specified limits
+        is_wb = np.logical_and(x >= x_pos_front_spar, x <= x_pos_rear_spar)
+
+        # Class function
+        C = (x) ** N1 * (1 - x) ** N2
+        # Shape function (Bernstein polynomials)
+        N = n_weights_per_side - 1  # Order of Bernstein polynomials
+
+        K = comb(N, np.arange(N + 1))  # Bernstein polynomial coefficients        
+
+        dims = (n_weights_per_side, n_coordinates)
+
+        def wide(vector):
+            return np.tile(np.reshape(vector, (1, dims[1])), (dims[0], 1))
+
+        def tall(vector):
+            return np.tile(np.reshape(vector, (dims[0], 1)), (1, dims[1]))
+
+        S_matrix = (
+                tall(K) * wide(x) ** tall(np.arange(N + 1)) *
+                wide(1 - x) ** tall(N - np.arange(N + 1))
+        )  # Bernstein polynomial coefficients * weight matrix
+
+        leading_edge_weight_row = x * np.maximum(1 - x, 0) ** (n_weights_per_side + 0.5)
+
+        trailing_edge_thickness_row = np.where(
+            is_upper,
+            x / 2,
+            -x / 2
+        )
+
+        A = np.concatenate([
+            np.where(wide(is_upper), 0, wide(C) * S_matrix).T,
+            np.where(wide(is_upper), wide(C) * S_matrix, 0).T,
+            np.reshape(leading_edge_weight_row, (n_coordinates, 1)),
+            np.reshape(trailing_edge_thickness_row, (n_coordinates, 1)),
+        ], axis=1)
+        # Delete columns corresponding to B.C. A0, An
+        clmn_delete = [0, n_weights_per_side - 1, n_weights_per_side, 2 * n_weights_per_side - 1,
+                       2 * n_weights_per_side]
+        clmn_keep = np.ones(A.shape[1], dtype=bool)
+        clmn_keep[clmn_delete] = False
+        Ac = A[:, clmn_keep]        
+        Ac[~is_wb] = 0
+        n_weights_per_side -= 2
+        # b = y
+        anl = np.tan(np.radians(TE_beta - TE_delta)) + yTE + TE_thickness / 2 - yLE
+        anu = np.tan(np.radians(TE_beta)) + yTE + TE_thickness / 2 - yLE
+        bl = y - x * yTE - (1 - x) * yLE - C * (
+                    lower_weights_init[0] * S_matrix[0, :] + anl * S_matrix[-1, :]) - leading_edge_weight_init * (x) * (
+                         1 - x) ** (np.length(lower_weights_init) + 0.5)
+        bu = y - x * yTE - (1 - x) * yLE - C * (
+                    upper_weights_init[0] * S_matrix[0, :] + anu * S_matrix[-1, :]) - leading_edge_weight_init * (x) * (
+                         1 - x) ** (np.length(upper_weights_init) + 0.5)
+        b = np.where(is_upper, bu, bl)
+        
+        b[~is_wb] = 0
+
+        # Solve system of linear equations problem
+        x = np.linalg.solve(np.matmul(Ac.T, Ac), np.matmul(Ac.T, b))
+
+        lower_weights = np.concatenate([np.array([lower_weights_init[0]]), x[:n_weights_per_side], np.array([anl])])
+        upper_weights = np.concatenate(
+            [np.array([upper_weights_init[0]]), x[n_weights_per_side:2 * n_weights_per_side], np.array([anu])])
+        # trailing_edge_thickness = TE_thickness
+        leading_edge_weight = leading_edge_weight_init
+        # leading_edge_weight =  x[-2]
+        trailing_edge_thickness = x[-1]
+        #
+
+        return {
+            "lower_weights": lower_weights,
+            "upper_weights": upper_weights,
+            "TE_thickness": trailing_edge_thickness,
+            "leading_edge_weight": leading_edge_weight,
+        }
     else:
         raise ValueError(f"Invalid method '{method}'.")
 
