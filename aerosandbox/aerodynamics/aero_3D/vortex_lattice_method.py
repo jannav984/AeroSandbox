@@ -398,7 +398,13 @@ class VortexLatticeMethod(ExplicitAnalysis):
         CLps = []
         CDps = []
         CMps = []   
-        if not is_casadi_type(airfoils[0].coordinates):   
+
+        if (not is_casadi_type(airfoils[0].coordinates)) and (not is_casadi_type(self.op_point.alpha)):
+            is_not_casadi = True
+        else:
+            is_not_casadi = False
+
+        if is_not_casadi:   
         # Calculate profile drag forces
         #    - use Newton's method to find the angle of attack that gives the local wing lift coefficient
             def get_aero(af, alpha, Re):
@@ -440,7 +446,7 @@ class VortexLatticeMethod(ExplicitAnalysis):
                     dcl_alpha = get_gradients(af, alpha1, Res[i])
                     error = cl - cLsi[i] 
                     if abs(error) < tol:
-                        print(f"Converged after {iter} iterations")
+                        # print(f"Converged after {iter} iterations")
                         break
                     alpha1 = alpha1 - error / dcl_alpha
                 CLp, CDp, CMp = get_aero(af, alpha1, Res[i])
@@ -489,7 +495,7 @@ class VortexLatticeMethod(ExplicitAnalysis):
         # Calculate total forces and moments
         force_geometry = np.sum(forces_geometry, axis=0)
         moment_geometry = np.sum(moments_geometry, axis=0)
-        if not is_casadi_type(airfoils[0].coordinates):
+        if is_not_casadi:
             force_geometry = np.add(force_geometry, force_profile_geometry)
             moment_geometry = (
                     np.add(moment_geometry, moment_profile_geometry)
